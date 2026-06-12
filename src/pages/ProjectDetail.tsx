@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Trash2, Play, RefreshCw, BarChart3, AlertTriangle,
   TrendingUp, Target, Layers, History, GitCompare, Pencil, X, Save,
-  Clock, DollarSign, Calendar, Settings, Info, Sparkles,
+  Clock, DollarSign, Calendar, Settings, Info, Sparkles, Download,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAppStore } from '@/store/useAppStore';
@@ -39,6 +39,7 @@ export default function ProjectDetail() {
     name: '', type: 'custom' as VariableType, min: '', max: '', mostLikely: '', weight: '', unit: '',
   });
   const [editForm, setEditForm] = useState<Partial<any>>({});
+  const [exporting, setExporting] = useState(false);
 
   const loadProject = async () => {
     setLoading(true);
@@ -159,6 +160,27 @@ export default function ProjectDetail() {
     }
   };
 
+  const handleExport = async () => {
+    if (!currentProject) return;
+    setExporting(true);
+    try {
+      const data = await api.projects.export(id);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${data.project.name.replace(/[\\/:*?"<>|]/g, '_')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导出失败');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const riskLevel = useMemo(() => {
     if (!currentSimulation) return null;
     const p = currentSimulation.lossProbability;
@@ -190,6 +212,10 @@ export default function ProjectDetail() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <button onClick={handleExport} className="btn-secondary text-sm" disabled={exporting}>
+                <Download className="w-4 h-4" />
+                {exporting ? '导出中...' : '导出'}
+              </button>
               <button onClick={() => setShowCompareModal(true)} className="btn-secondary text-sm" disabled={simulations.length < 2}>
                 <GitCompare className="w-4 h-4" />
                 对比

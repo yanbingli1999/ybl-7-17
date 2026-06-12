@@ -119,3 +119,30 @@ export interface CreateCompareDto {
   name: string;
   simulationIds: string[];
 }
+
+export interface ProjectExportData {
+  version: string;
+  exportedAt: string;
+  project: Project;
+  variables: Variable[];
+  simulations: SimulationResult[];
+  comparisons: CompareRecord[];
+}
+
+export interface ImportProjectDto {
+  data: ProjectExportData;
+  newName?: string;
+}
+
+export interface ImportResult {
+  success: boolean;
+  project: Project;
+  variableCount: number;
+  simulationCount: number;
+  comparisonCount: number;
+}
+
+export interface CheckNameResult {
+  exists: boolean;
+  suggestedName?: string;
+}

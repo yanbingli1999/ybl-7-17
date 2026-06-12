@@ -1,7 +1,7 @@
 import type {
   Project, ProjectWithVariables, Variable, SimulationResult, CompareRecord,
   CreateProjectDto, UpdateProjectDto, CreateVariableDto, UpdateVariableDto,
-  RunSimulationDto, CreateCompareDto,
+  RunSimulationDto, CreateCompareDto, ProjectExportData, ImportResult, CheckNameResult,
 } from '../../shared/types.js';
 
 const API_BASE = '/api';
@@ -27,6 +27,10 @@ export const api = {
     remove: (id: string) => request<{ success: boolean }>(`/projects/${id}`, { method: 'DELETE' }),
     addVariable: (projectId: string, dto: CreateVariableDto) =>
       request<Variable>(`/projects/${projectId}/variables`, { method: 'POST', body: JSON.stringify(dto) }),
+    export: (id: string) => request<ProjectExportData>(`/projects/${id}/export`),
+    checkName: (name: string) => request<CheckNameResult>(`/projects/check-name/exists?name=${encodeURIComponent(name)}`),
+    import: (data: ProjectExportData, newName?: string) =>
+      request<ImportResult>('/projects/import', { method: 'POST', body: JSON.stringify({ data, newName }) }),
   },
   variables: {
     update: (id: string, dto: UpdateVariableDto) =>

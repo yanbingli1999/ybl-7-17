@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Play, FolderKanban, Activity, Calendar, X } from 'lucide-react';
+import { Plus, Trash2, Play, FolderKanban, Activity, Calendar, X, Upload, FileJson, AlertCircle, CheckCircle } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAppStore } from '@/store/useAppStore';
-import type { Project } from '../../shared/types.js';
+import type { Project, ProjectExportData } from '../../shared/types.js';
 
 type ProjectListItem = Project & {
   variableCount: number;
@@ -19,6 +19,17 @@ export default function Home() {
   const [newDesc, setNewDesc] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importData, setImportData] = useState<ProjectExportData | null>(null);
+  const [importName, setImportName] = useState('');
+  const [nameExists, setNameExists] = useState(false);
+  const [suggestedName, setSuggestedName] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [checkingName, setCheckingName] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadProjects = async () => {
     setLoading(true);
@@ -65,6 +76,102 @@ export default function Home() {
       alert(err instanceof Error ? err.message : '删除失败');
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleImportClick = () => {
+    setShowImportModal(true);
+    setImportFile(null);
+    setImportData(null);
+    setImportName('');
+    setNameExists(false);
+    setSuggestedName('');
+    setImportError('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportFile(file);
+    setImportError('');
+    setImportData(null);
+    setImportName('');
+    setNameExists(false);
+    setSuggestedName('');
+
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as ProjectExportData;
+
+      if (!data.project || !data.version) {
+        throw new Error('文件格式不正确，缺少项目信息');
+      }
+
+      setImportData(data);
+      setImportName(data.project.name);
+      checkProjectName(data.project.name);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : '文件解析失败，请确保是有效的 JSON 文件');
+    }
+  };
+
+  const checkProjectName = async (name: string) => {
+    if (!name.trim()) {
+      setNameExists(false);
+      setSuggestedName('');
+      return;
+    }
+
+    setCheckingName(true);
+    try {
+      const result = await api.projects.checkName(name.trim());
+      setNameExists(result.exists);
+      setSuggestedName(result.suggestedName || '');
+    } catch {
+      setNameExists(false);
+      setSuggestedName('');
+    } finally {
+      setCheckingName(false);
+    }
+  };
+
+  const handleImportNameChange = (name: string) => {
+    setImportName(name);
+    checkProjectName(name);
+  };
+
+  const handleUseSuggestedName = () => {
+    if (suggestedName) {
+      setImportName(suggestedName);
+      checkProjectName(suggestedName);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!importData || !importName.trim()) return;
+    if (nameExists) {
+      alert('项目名称已存在，请修改名称后重试');
+      return;
+    }
+
+    setImporting(true);
+    try {
+      const result = await api.projects.import(importData, importName.trim());
+      setShowImportModal(false);
+      loadProjects();
+      alert(`导入成功！\n项目: ${result.project.name}\n变量: ${result.variableCount} 个\n模拟: ${result.simulationCount} 次\n对比: ${result.comparisonCount} 条`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '导入失败';
+      if (msg.includes('名称已存在') || msg.includes('409')) {
+        checkProjectName(importName);
+      }
+      setImportError(msg);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -116,10 +223,16 @@ export default function Home() {
             </h2>
             <p className="text-sm text-monte-muted">创建项目开始蒙特卡洛风险模拟</p>
           </div>
-          <button onClick={() => setShowModal(true)} className="btn-primary">
-            <Plus className="w-4 h-4" />
-            新建项目
-          </button>
+          <div className="flex gap-3">
+            <button onClick={handleImportClick} className="btn-secondary">
+              <Upload className="w-4 h-4" />
+              导入项目
+            </button>
+            <button onClick={() => setShowModal(true)} className="btn-primary">
+              <Plus className="w-4 h-4" />
+              新建项目
+            </button>
+          </div>
         </div>
 
         {projects.length === 0 ? (
@@ -241,6 +354,163 @@ export default function Home() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="card w-full max-w-lg shadow-2xl relative max-h-[90vh] overflow-y-auto">
+            <button
+              onClick={() => setShowImportModal(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-lg text-monte-muted hover:text-white hover:bg-monte-border transition-all"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <h2 className="text-xl font-bold text-white mb-5 flex items-center gap-2">
+              <Upload className="w-5 h-5 text-monte-accent" />
+              导入项目
+            </h2>
+
+            <div className="space-y-5">
+              <div>
+                <label className="label">选择 JSON 文件</label>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleFileSelect}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full border-2 border-dashed border-monte-border rounded-xl p-6 text-center hover:border-monte-accent/50 hover:bg-monte-accent/5 transition-all"
+                >
+                  <FileJson className="w-10 h-10 text-monte-accent mx-auto mb-3" />
+                  {importFile ? (
+                    <div>
+                      <div className="text-white font-medium">{importFile.name}</div>
+                      <div className="text-xs text-monte-muted mt-1">
+                        {(importFile.size / 1024).toFixed(1)} KB
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-white font-medium">点击选择文件</div>
+                      <div className="text-xs text-monte-muted mt-1">
+                        支持 .json 格式的项目导出文件
+                      </div>
+                    </div>
+                  )}
+                </button>
+              </div>
+
+              {importError && (
+                <div className="p-4 rounded-xl bg-monte-danger/10 border border-monte-danger/30 flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 text-monte-danger flex-shrink-0 mt-0.5" />
+                  <div className="text-sm text-monte-danger">{importError}</div>
+                </div>
+              )}
+
+              {importData && (
+                <>
+                  <div className="p-4 rounded-xl bg-monte-bg/50 border border-monte-border">
+                    <div className="text-sm font-medium text-white mb-3">文件内容预览</div>
+                    <div className="grid grid-cols-3 gap-3 text-center">
+                      <div className="p-3 rounded-lg bg-monte-bg border border-monte-border/50">
+                        <div className="text-lg font-bold text-monte-accent font-mono">
+                          {importData.variables?.length || 0}
+                        </div>
+                        <div className="text-xs text-monte-muted">变量</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-monte-bg border border-monte-border/50">
+                        <div className="text-lg font-bold text-monte-safe font-mono">
+                          {importData.simulations?.length || 0}
+                        </div>
+                        <div className="text-xs text-monte-muted">模拟</div>
+                      </div>
+                      <div className="p-3 rounded-lg bg-monte-bg border border-monte-border/50">
+                        <div className="text-lg font-bold text-white font-mono">
+                          {importData.comparisons?.length || 0}
+                        </div>
+                        <div className="text-xs text-monte-muted">对比</div>
+                      </div>
+                    </div>
+                    {importData.exportedAt && (
+                      <div className="text-xs text-monte-muted mt-3 text-center">
+                        导出时间: {new Date(importData.exportedAt).toLocaleString('zh-CN')}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="label">项目名称 *</label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={importName}
+                        onChange={e => handleImportNameChange(e.target.value)}
+                        placeholder="输入项目名称"
+                        className={`input ${
+                          nameExists
+                            ? '!border-monte-danger/60 focus:!border-monte-danger'
+                            : !nameExists && importName.trim()
+                            ? '!border-monte-safe/60 focus:!border-monte-safe'
+                            : ''
+                        }`}
+                      />
+                      {checkingName && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 text-monte-muted">
+                          检测中...
+                        </div>
+                      )}
+                      {!checkingName && nameExists && (
+                        <AlertCircle className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-monte-danger" />
+                      )}
+                      {!checkingName && !nameExists && importName.trim() && (
+                        <CheckCircle className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-monte-safe" />
+                      )}
+                    </div>
+                    {nameExists && (
+                      <div className="mt-2">
+                        <p className="text-xs text-monte-danger mb-2 flex items-center gap-1">
+                          <AlertCircle className="w-3.5 h-3.5" />
+                          该名称已存在，请修改或使用建议名称
+                        </p>
+                        {suggestedName && (
+                          <button
+                            type="button"
+                            onClick={handleUseSuggestedName}
+                            className="text-xs text-monte-accent hover:underline"
+                          >
+                            使用建议名称: {suggestedName}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowImportModal(false)}
+                  className="btn-secondary flex-1"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleImport}
+                  disabled={importing || !importData || !importName.trim() || nameExists}
+                  className="btn-primary flex-1"
+                >
+                  {importing ? '导入中...' : '导入项目'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

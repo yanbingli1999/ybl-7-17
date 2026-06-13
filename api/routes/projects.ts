@@ -199,6 +199,79 @@ router.get('/check-name/exists', (req: Request, res: Response) => {
   res.json(result);
 });
 
+function validateImportData(data: ProjectExportData): string | null {
+  if (!data || !data.project) return '缺少项目数据';
+  if (!data.project.name?.trim()) return '项目名称不能为空';
+
+  const varIds = new Set<string>();
+  for (const v of data.variables || []) {
+    if (!v.id) return '存在无效的变量（缺少ID）';
+    if (!v.name?.trim()) return '存在空名称的变量';
+    if (varIds.has(v.id)) return `存在重复的变量ID: ${v.id}`;
+    varIds.add(v.id);
+    if (v.projectId !== data.project.id) {
+      return `变量 ${v.name} 不属于该项目`;
+    }
+  }
+
+  const simIds = new Set<string>();
+  for (const s of data.simulations || []) {
+    if (!s.id) return '存在无效的模拟结果（缺少ID）';
+    if (simIds.has(s.id)) return `存在重复的模拟ID: ${s.id}`;
+    simIds.add(s.id);
+    if (s.projectId !== data.project.id) {
+      return `模拟结果 ${s.runName || s.id} 不属于该项目`;
+    }
+    for (const item of s.sensitivity || []) {
+      if (item.variableId && !varIds.has(item.variableId)) {
+        return `模拟结果 ${s.runName || s.id} 的敏感性分析引用了不存在的变量`;
+      }
+    }
+  }
+
+  for (const c of data.comparisons || []) {
+    if (!c.id) return '存在无效的对比记录（缺少ID）';
+    if (c.projectId !== data.project.id) {
+      return `对比记录 ${c.name || c.id} 不属于该项目`;
+    }
+    for (const simId of c.simulationIds || []) {
+      if (!simIds.has(simId)) {
+        return `对比记录 ${c.name || c.id} 引用了不存在的模拟结果`;
+      }
+    }
+  }
+
+  return null;
+}
+
+function rollbackImport(projectId: string, stages: {
+  project: boolean;
+  variables: boolean;
+  simulations: boolean;
+  comparisons: boolean;
+}): void {
+  try {
+    if (stages.comparisons) {
+      comparisonsStore.deleteMany(c => c.projectId === projectId);
+    }
+  } catch { /* ignore */ }
+  try {
+    if (stages.simulations) {
+      simulationsStore.deleteMany(s => s.projectId === projectId);
+    }
+  } catch { /* ignore */ }
+  try {
+    if (stages.variables) {
+      variablesStore.deleteMany(v => v.projectId === projectId);
+    }
+  } catch { /* ignore */ }
+  try {
+    if (stages.project) {
+      projectsStore.delete(projectId);
+    }
+  } catch { /* ignore */ }
+}
+
 router.post('/import', (req: Request, res: Response) => {
   const dto = req.body as ImportProjectDto;
   if (!dto.data || !dto.data.project) {
@@ -211,6 +284,12 @@ router.post('/import', (req: Request, res: Response) => {
 
   if (!projectName) {
     res.status(400).json({ error: '项目名称不能为空' });
+    return;
+  }
+
+  const validationError = validateImportData(data);
+  if (validationError) {
+    res.status(400).json({ error: '数据验证失败: ' + validationError });
     return;
   }
 
@@ -238,69 +317,113 @@ router.post('/import', (req: Request, res: Response) => {
   const newProjectId = uuidv4();
   const now = new Date().toISOString();
 
-  const newProject: Project = {
-    id: newProjectId,
-    name: projectName,
-    description: data.project.description || '',
-    createdAt: now,
-    updatedAt: now,
-  };
-  projectsStore.create(newProject);
-
-  const variableIdMap = new Map<string, string>();
-  const newVariables: Variable[] = (data.variables || []).map(v => {
-    const newId = uuidv4();
-    variableIdMap.set(v.id, newId);
-    return {
-      ...v,
-      id: newId,
-      projectId: newProjectId,
-      createdAt: now,
-    };
-  });
-  variablesStore.bulkCreate(newVariables);
-
-  const simulationIdMap = new Map<string, string>();
-  const newSimulations: SimulationResult[] = (data.simulations || []).map(s => {
-    const newId = uuidv4();
-    simulationIdMap.set(s.id, newId);
-    const newSensitivity = (s.sensitivity || []).map(item => ({
-      ...item,
-      variableId: variableIdMap.get(item.variableId) || item.variableId,
-    }));
-    return {
-      ...s,
-      id: newId,
-      projectId: newProjectId,
-      timestamp: now,
-      sensitivity: newSensitivity,
-    };
-  });
-  simulationsStore.bulkCreate(newSimulations);
-
-  const newComparisons: CompareRecord[] = (data.comparisons || []).map(c => {
-    const newSimulationIds = c.simulationIds
-      .map(id => simulationIdMap.get(id))
-      .filter((id): id is string => id !== undefined);
-    return {
-      ...c,
-      id: uuidv4(),
-      projectId: newProjectId,
-      simulationIds: newSimulationIds,
-      createdAt: now,
-    };
-  }).filter(c => c.simulationIds.length >= 2);
-  comparisonsStore.bulkCreate(newComparisons);
-
-  const result: ImportResult = {
-    success: true,
-    project: newProject,
-    variableCount: newVariables.length,
-    simulationCount: newSimulations.length,
-    comparisonCount: newComparisons.length,
+  const stages = {
+    project: false,
+    variables: false,
+    simulations: false,
+    comparisons: false,
   };
 
-  res.status(201).json(result);
+  try {
+    const variableIdMap = new Map<string, string>();
+    const newVariables: Variable[] = (data.variables || []).map(v => {
+      const newId = uuidv4();
+      variableIdMap.set(v.id, newId);
+      return {
+        ...v,
+        id: newId,
+        projectId: newProjectId,
+        createdAt: now,
+      };
+    });
+
+    const simulationIdMap = new Map<string, string>();
+    const newSimulations: SimulationResult[] = (data.simulations || []).map(s => {
+      const newId = uuidv4();
+      simulationIdMap.set(s.id, newId);
+
+      const newSensitivity = (s.sensitivity || [])
+        .map(item => {
+          const newVarId = variableIdMap.get(item.variableId);
+          if (!newVarId) return null;
+          const matchedVar = newVariables.find(v => v.id === newVarId);
+          return {
+            ...item,
+            variableId: newVarId,
+            variableName: matchedVar ? matchedVar.name : item.variableName,
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null);
+
+      let newVariableSamples: Record<string, number[]> | undefined;
+      if (s.variableSamples && Object.keys(s.variableSamples).length > 0) {
+        newVariableSamples = {};
+        for (const [oldVarId, samples] of Object.entries(s.variableSamples)) {
+          const newVarId = variableIdMap.get(oldVarId);
+          if (newVarId) {
+            newVariableSamples[newVarId] = samples;
+          }
+        }
+      }
+
+      return {
+        ...s,
+        id: newId,
+        projectId: newProjectId,
+        timestamp: now,
+        sensitivity: newSensitivity,
+        variableSamples: newVariableSamples,
+      };
+    });
+
+    const newComparisons: CompareRecord[] = (data.comparisons || [])
+      .map(c => {
+        const newSimulationIds = c.simulationIds
+          .map(id => simulationIdMap.get(id))
+          .filter((id): id is string => id !== undefined);
+        return {
+          ...c,
+          id: uuidv4(),
+          projectId: newProjectId,
+          simulationIds: newSimulationIds,
+          createdAt: now,
+        };
+      })
+      .filter(c => c.simulationIds.length >= 2);
+
+    const newProject: Project = {
+      id: newProjectId,
+      name: projectName,
+      description: data.project.description || '',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    projectsStore.create(newProject);
+    stages.project = true;
+
+    variablesStore.bulkCreate(newVariables);
+    stages.variables = true;
+
+    simulationsStore.bulkCreate(newSimulations);
+    stages.simulations = true;
+
+    comparisonsStore.bulkCreate(newComparisons);
+    stages.comparisons = true;
+
+    const result: ImportResult = {
+      success: true,
+      project: newProject,
+      variableCount: newVariables.length,
+      simulationCount: newSimulations.length,
+      comparisonCount: newComparisons.length,
+    };
+
+    res.status(201).json(result);
+  } catch (err) {
+    rollbackImport(newProjectId, stages);
+    res.status(500).json({ error: '导入失败: ' + (err instanceof Error ? err.message : String(err)) });
+  }
 });
 
 export default router;
